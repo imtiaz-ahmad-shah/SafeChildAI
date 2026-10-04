@@ -7,4 +7,7 @@
 /captures/
 .externalNativeBuild/
 .cxx/
-app/build/app/google-services.json
+app/build/
+app/google-services.json
+functions/node_modules/
+.DS_Store

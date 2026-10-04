@@ -1,0 +1,227 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper function to check if parent is linked to child
+    function isParentOf(parentUid, childUid) {
+      return exists(/databases/$(database)/documents/relationships/$(parentUid + '_' + childUid));
+    }
+
+    // User profiles
+    match /users/{userId} {
+      // User can read/write their own profile; parent can read child profile
+      allow read: if request.auth != null && (request.auth.uid == userId || isParentOf(request.auth.uid, userId));
+      allow write: if request.auth != null && request.auth.uid == userId;
+
+      // Trusted Locations (Owned by parent)
+      match /trustedLocations/{locId} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+        allow read: if request.auth != null && isParentOf(userId, request.auth.uid);
+      }
+
+      // Location data (Owned by child)
+      match /location/{docId} {
+        allow write: if request.auth != null && request.auth.uid == userId;
+        allow read: if request.auth != null &&
+          (request.auth.uid == userId || isParentOf(request.auth.uid, userId));
+      }
+
+      // Historical Location Breadcrumbs (Owned by child)
+      match /locationHistory/{historyId} {
+        allow write: if request.auth != null && request.auth.uid == userId;
+        allow read: if request.auth != null &&
+          (request.auth.uid == userId || isParentOf(request.auth.uid, userId));
+      }
+
+      // Location Events (Owned by child)
+      match /locationEvents/{eventId} {
+        allow write: if request.auth != null && request.auth.uid == userId;
+        allow read: if request.auth != null &&
+          (request.auth.uid == userId || isParentOf(request.auth.uid, userId));
+      }
+
+      // Parent-only AI review records and feedback for the linked child.
+      match /aiReviewHistory/{reviewId} {
+        allow read: if request.auth != null && isParentOf(request.auth.uid, userId);
+
+        allow create: if request.auth != null
+          && isParentOf(request.auth.uid, userId)
+          && request.resource.data.keys().hasAll([
+            "parentUid", "childUid", "title", "explanation", "firstSeenMillis",
+            "lastSeenMillis", "latitude", "longitude", "synthetic", "updatedAt"
+          ])
+          && request.resource.data.keys().hasOnly([
+            "parentUid", "childUid", "title", "explanation", "firstSeenMillis",
+            "lastSeenMillis", "latitude", "longitude", "synthetic", "updatedAt", "feedback", "needsReview"
+          ])
+          && request.resource.data.parentUid == request.auth.uid
+          && request.resource.data.childUid == userId
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 120
+          && request.resource.data.explanation is string
+          && request.resource.data.explanation.size() <= 500
+          && request.resource.data.firstSeenMillis is int
+          && request.resource.data.lastSeenMillis is int
+          && request.resource.data.firstSeenMillis > 0
+          && request.resource.data.lastSeenMillis >= request.resource.data.firstSeenMillis
+          && request.resource.data.lastSeenMillis <= request.time.toMillis()
+
+          && request.resource.data.latitude is number
+          && request.resource.data.latitude >= -90
+          && request.resource.data.latitude <= 90
+          && request.resource.data.longitude is number
+          && request.resource.data.longitude >= -180
+          && request.resource.data.longitude <= 180
+          && request.resource.data.synthetic is bool
+          && (!("needsReview" in request.resource.data.keys()) || request.resource.data.needsReview is bool)
+          && request.resource.data.updatedAt == request.time
+          && (!("feedback" in request.resource.data.keys()) || request.resource.data.feedback in ["expected", "concern"]);
+
+        allow update: if request.auth != null
+          && isParentOf(request.auth.uid, userId)
+          && resource.data.parentUid == request.auth.uid
+          && resource.data.childUid == userId
+          && request.resource.data.parentUid == resource.data.parentUid
+          && request.resource.data.childUid == resource.data.childUid
+          && request.resource.data.title == resource.data.title
+          && request.resource.data.firstSeenMillis == resource.data.firstSeenMillis
+          && request.resource.data.synthetic == resource.data.synthetic
+          && (!("needsReview" in resource.data.keys()) || request.resource.data.needsReview == resource.data.needsReview)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            "explanation", "lastSeenMillis", "latitude", "longitude", "updatedAt", "feedback", "needsReview"
+          ])
+          && request.resource.data.explanation is string
+          && request.resource.data.explanation.size() <= 500
+          && request.resource.data.lastSeenMillis is int
+          && request.resource.data.lastSeenMillis >= request.resource.data.firstSeenMillis
+          && request.resource.data.lastSeenMillis <= request.time.toMillis()
+          && (!("needsReview" in request.resource.data.keys()) || request.resource.data.needsReview is bool)
+          && request.resource.data.latitude is number
+          && request.resource.data.latitude >= -90
+          && request.resource.data.latitude <= 90
+          && request.resource.data.longitude is number
+          && request.resource.data.longitude >= -180
+          && request.resource.data.longitude <= 180
+          && request.resource.data.updatedAt == request.time
+          && (!("feedback" in request.resource.data.keys()) || request.resource.data.feedback in ["expected", "concern"]);
+
+        allow delete: if false;
+      }
+
+      // Linking subcollection (legacy/compatibility)
+      match /linking/{docId} {
+        allow read: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    // Temporary QR Pairing Requests
+    match /pairing_requests/{requestId} {
+      // Child creates pairing request for themselves
+      allow create: if request.auth != null
+        && request.resource.data.childUid == request.auth.uid
+        && request.resource.data.status == "pending"
+        && request.resource.data.keys().hasOnly([
+          "childUid", "childName", "status", "createdAt", "expiresAt"
+        ])
+        && request.resource.data.expiresAt is timestamp
+        && request.resource.data.expiresAt > request.time;
+
+      // A child can read their own request. A parent can inspect only a live request,
+      // or the used request that they consumed, so the UI can reject QR reuse.
+      allow get: if request.auth != null && (
+        resource.data.childUid == request.auth.uid ||
+        (resource.data.status == "pending" && resource.data.expiresAt > request.time) ||
+        resource.data.usedByParentUid == request.auth.uid
+      );
+      allow list: if request.auth != null && resource.data.childUid == request.auth.uid;
+
+      // Only atomically consume a live request once. Pairing identity and QR payload
+      // fields cannot be changed by the consuming parent.
+      allow update: if request.auth != null
+        && request.auth.uid != resource.data.childUid
+        && resource.data.status == "pending"
+        && resource.data.expiresAt > request.time
+        && request.resource.data.status == "used"
+        && request.resource.data.usedByParentUid == request.auth.uid
+        && request.resource.data.childUid == resource.data.childUid
+        && request.resource.data.childName == resource.data.childName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.expiresAt == resource.data.expiresAt
+        && request.resource.data.usedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "usedByParentUid", "usedAt"]);
+
+      allow delete: if request.auth != null
+        && resource.data.childUid == request.auth.uid
+        && resource.data.status == "pending";
+    }
+
+    // Relationships
+    match /relationships/{relId} {
+      // Parent or Child can query/read their own active relationships
+      allow read: if request.auth != null && (request.auth.uid == resource.data.parentUid || request.auth.uid == resource.data.childUid);
+
+      // Parent creates relationship ONLY if they are parentUid and present a valid, active pairing request from child
+      allow create: if request.auth != null
+        && request.resource.data.parentUid == request.auth.uid
+        && request.resource.data.status == "active"
+        && request.resource.data.keys().hasOnly([
+          "parentUid", "childUid", "childName", "status", "createdAt", "requestId"
+        ])
+        && request.resource.data.childUid is string
+        && request.resource.data.requestId is string
+        && request.resource.data.createdAt == request.time
+        && relId == (request.resource.data.parentUid + '_' + request.resource.data.childUid)
+        && exists(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId))
+        && get(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.childUid == request.resource.data.childUid
+        && get(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.childName == request.resource.data.childName
+        && get(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.status == "pending"
+        && get(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.expiresAt > request.time
+        && getAfter(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.status == "used"
+        && getAfter(/databases/$(database)/documents/pairing_requests/$(request.resource.data.requestId)).data.usedByParentUid == request.auth.uid;
+
+      // Relationships are created once from a live QR and are not repurposed.
+      allow update: if false;
+      allow delete: if request.auth != null && request.auth.uid == resource.data.parentUid;
+    }
+
+    // Child-created safety events visible only to the linked child and intended parent.
+    match /safety_events/{eventId} {
+      allow create: if request.auth != null
+        && request.resource.data.keys().hasOnly([
+          "childUid", "childName", "parentUid", "type", "status", "createdAt"
+        ])
+        && request.resource.data.childUid == request.auth.uid
+        && request.resource.data.childName is string
+        && request.resource.data.parentUid is string
+        && request.resource.data.type in ["safe_check_in", "sos"]
+        && request.resource.data.status == "open"
+        && request.resource.data.createdAt == request.time
+        && exists(/databases/$(database)/documents/relationships/$(request.resource.data.parentUid + '_' + request.auth.uid))
+        && get(/databases/$(database)/documents/relationships/$(request.resource.data.parentUid + '_' + request.auth.uid)).data.childUid == request.auth.uid
+        && get(/databases/$(database)/documents/relationships/$(request.resource.data.parentUid + '_' + request.auth.uid)).data.parentUid == request.resource.data.parentUid
+        && get(/databases/$(database)/documents/relationships/$(request.resource.data.parentUid + '_' + request.auth.uid)).data.status == "active";
+
+      allow read: if request.auth != null
+        && (request.auth.uid == resource.data.childUid || request.auth.uid == resource.data.parentUid);
+
+      allow update: if request.auth != null
+        && request.auth.uid == resource.data.parentUid
+        && resource.data.status == "open"
+        && request.resource.data.status == "resolved"
+        && request.resource.data.childUid == resource.data.childUid
+        && request.resource.data.childName == resource.data.childName
+        && request.resource.data.parentUid == resource.data.parentUid
+        && request.resource.data.type == resource.data.type
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.resolvedAt == request.time
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(["status", "resolvedAt"]);
+
+      allow delete: if false;
+    }
+    // Block all client access to legacy lookup table
+    match /linking_codes/{code} {
+      allow read, write: if false;
+    }
+  }
+}
+
