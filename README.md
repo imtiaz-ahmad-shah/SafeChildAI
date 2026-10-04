@@ -8,7 +8,7 @@ SafeChildAI is an Android app for parent–child safety check-ins and location s
 
 - [What it does](#what-it-does)
 - [How it works](#how-it-works)
-- [Location patterns](#location-patterns)
+- [Core AI feature: location-pattern review](#core-ai-feature-per-child-location-pattern-review)
 - [Technology](#technology)
 - [Run the Android app](#run-the-android-app)
 - [Configure Firebase](#configure-firebase)
@@ -54,12 +54,25 @@ flowchart LR
     C -->|Geofence transitions| F
 ```
 
-## Location patterns
+## Core AI feature: per-child location-pattern review
 
-The parent app contains a per-child Isolation Forest model that reviews location-history patterns on the parent’s device. It considers approximate position and time-of-week features. Automatic fitting waits for at least 36 usable readings across at least 3 distinct days. A flagged pattern can appear as an AI review item and notification for the parent to assess.
+SafeChildAI includes an on-device anomaly-detection feature that helps a parent notice when a child’s recent location and timing differ from that child’s own observed routine. It is designed to prompt a human review, not to decide whether a child is safe.
 
-This is a lightweight anomaly signal. It does not identify an emergency, diagnose behavior, or replace a parent’s judgment. SafeChildAI does not send these coordinates to a separate AI service.
+### How the AI works
 
+1. **Collect the child’s location history.** While the parent is signed in, `ParentAiRoutineMonitor` watches active parent–child relationships, the child’s location history, and fresh current-location updates from Firestore. Location sharing must be enabled on the child’s device.
+2. **Filter and encode readings.** The model discards invalid coordinates, invalid timestamps, and readings with missing or poor accuracy (over 100 meters). It keeps readings at least 10 minutes apart. Each retained point becomes four numeric features: north/east displacement from the child-specific origin, plus sine and cosine encodings of the minute within the week. The time encoding lets the model compare both place and weekly timing without a discontinuity at the week boundary.
+3. **Learn a separate baseline for each child.** The Kotlin `IsolationForest` implementation needs at least 36 usable readings spread over at least 3 distinct days. It builds 64 randomized trees, using at most 256 samples per tree. Unusual points tend to be isolated in fewer tree splits and receive a higher anomaly score. A threshold is calibrated from that child’s training scores. The baseline refreshes after 6 hours or after at least 12 additional usable readings.
+4. **Score fresh locations.** Once a baseline exists, the parent app scores a valid current location that is less than 20 minutes old. It shows either **Location pattern needs a check** or **No unusual pattern detected**, with an explanation and score. During the cold-start period, it reports how many readings and days have been collected instead of pretending the model is ready.
+5. **Present a review signal.** A new unusual episode can create a notification and appears in the parent’s **AI & Activity** review history with its location and time. Repeated matching signals within 20 minutes are grouped. Parents can view the point on a map and label it **Expected** or **Needs attention**. Feedback is saved for prototype evaluation; it does not retrain the current model or establish ground truth.
+
+### Where the AI runs and what it uses
+
+The model is implemented in Kotlin in `IsolationForest.kt` and `RoutineDemoModel.kt`, and is orchestrated by `ParentAiRoutineMonitor.kt`. Training data is read from Firestore location history; scoring runs in the parent app. The model’s compact baseline data is stored in the parent app’s local preferences, while review records are also synced to the linked child’s Firestore record. The app does not send coordinates to a separate AI provider.
+
+### Limits
+
+This is a prototype anomaly detector, not a generative AI assistant, a medical or behavioral assessment, or an emergency detector. A high score can be caused by ordinary changes such as travel, a new schedule, or inaccurate GPS; familiar-looking data can also fail to flag a real concern. It does not automatically send an SOS or contact emergency services. Parents should check the map and contact the child when needed. Scoring depends on the parent app being active in a signed-in session, network access to Firebase, location sharing, and enough recent history to train the model.
 ## Technology
 
 - Kotlin and Jetpack Compose
@@ -128,3 +141,4 @@ Firestore rules are part of the security boundary. Review them and test your own
 ## License
 
 No open-source license has been selected. Public visibility allows people to view and clone the repository, but it does not grant permission to reuse, modify, or redistribute the code. Ask the project owner before reusing it.
+
